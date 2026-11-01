@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
-import './App.css'
-import ModelLoader from './components/ModelLoder'
+import { useEffect, useRef, useState } from 'react';
+import './App.css';
+import { loadYOLOModel, detectObjects } from './services/detectionService';
+import { decodeYOLO } from './services/yoloDetaction';
+import { drawDetections } from './services/drawDetections';
+
 
 function App() {
   const videoRef = useRef(null)
@@ -9,10 +12,125 @@ function App() {
   const [isLoading, setIsLoading] = useState(false)
   const [isSwitching, setIsSwitching] = useState(false)
   const [error, setError] = useState('')
+
+  const [modelLoaded, setModelLoaded] = useState(false);
+  const [modelLoading, setModelLoading] = useState(true);
+  const [detectionStatus, setDetectionStatus] = useState(
+    'Loading AI model...'
+  );
+  const canvasRef = useRef(null)
+  const [detectedObjects, setDetectedObjects] = useState([])
+
+
+  // Add this effect to load the model once
+  useEffect(() => {
+
+    const initializeModel = async () => {
+      try {
+        await loadYOLOModel();
+
+        setModelLoaded(true);
+        setDetectionStatus('AI model ready');
+
+      } catch (error) {
+
+        console.error(error);
+
+        setDetectionStatus('AI model failed to load');
+
+      } finally {
+        setModelLoading(false);
+      }
+    };
+
+    initializeModel();
+
+  }, []);
+
+
   // 'user' = front camera, 'environment' = back camera.
   const [facingMode, setFacingMode] = useState('user')
 
-  // Stop any tracks currently held so the device can be reused.
+  // Keep the overlay canvas pixel size matched to the displayed video so
+  // the boxes line up exactly with what the user sees.
+  const syncCanvasSize = () => {
+    const video = videoRef.current
+    const canvas = canvasRef.current
+    if (!video || !canvas) return
+
+    const { clientWidth, clientHeight } = video
+    if (
+      clientWidth > 0 &&
+      clientHeight > 0 &&
+      (canvas.width !== clientWidth || canvas.height !== clientHeight)
+    ) {
+      canvas.width = clientWidth
+      canvas.height = clientHeight
+    }
+  }
+
+  // Add a detection loop
+  useEffect(() => {
+    if (!isActive || !modelLoaded) return
+
+    let animationId
+    let processing = false
+    let lastRun = 0
+    let cancelled = false
+
+    const runDetection = async (timestamp) => {
+      if (cancelled) return
+
+      // Limit inference to approximately 6-7 FPS initially.
+      if (
+        timestamp - lastRun >= 150 &&
+        !processing &&
+        videoRef.current?.readyState >= 2
+      ) {
+        processing = true
+        lastRun = timestamp
+
+        try {
+          const output = await detectObjects(videoRef.current)
+
+          const detections = decodeYOLO(output)
+
+          if (!cancelled) {
+            setDetectedObjects(detections)
+
+            syncCanvasSize()
+            drawDetections(canvasRef.current, detections, {
+              mirror: facingMode === 'user',
+            })
+          }
+
+        } catch (error) {
+          console.error('Detection error:', error)
+        } finally {
+          processing = false
+        }
+      }
+
+      if (!cancelled) {
+        animationId = requestAnimationFrame(runDetection)
+      }
+    }
+
+    animationId = requestAnimationFrame(runDetection)
+
+    // Capture the canvas node now so cleanup clears the right element.
+    const canvasNode = canvasRef.current
+
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(animationId)
+      setDetectedObjects([])
+      drawDetections(canvasNode, [])
+    }
+
+  }, [isActive, modelLoaded, facingMode])
+
+  // Stop any tracks currently held so the device can be reused. (fn)
   const stopTracks = () => {
     const stream = streamRef.current
     if (stream) {
@@ -121,21 +239,49 @@ function App() {
 
   return (
     <div className="app">
+
+
       <header className="app-bar">
         <h1 className="app-name">VEYRA</h1>
       </header>
 
+
+
       <main
-        className={`camera-view ${isActive ? 'is-active' : ''} ${
-          isFront ? 'is-front' : ''
-        }`}
+        className={`camera-view ${isActive ? 'is-active' : ''} ${isFront ? 'is-front' : ''
+          }`}
       >
+
+        <div className="ai-status">
+          {modelLoading
+            ? 'Loading AI model...'
+            : detectionStatus}
+        </div>
         <video
           ref={videoRef}
           className="camera-video"
           autoPlay
           playsInline
           muted
+        />
+        <div className="detection-info">
+          <strong>Detected Objects</strong>
+
+          {detectedObjects.length === 0 ? (
+            <p>No objects detected</p>
+          ) : (
+            detectedObjects.map((item, index) => (
+              <span key={`${item.classId}-${index}`}>
+                {item.label} - {
+                  (item.confidence * 100).toFixed(1)
+                }%
+              </span>
+            ))
+          )}
+        </div>
+        <canvas
+          ref={canvasRef}
+          className="detection-canvas"
         />
 
         {!isActive && (
